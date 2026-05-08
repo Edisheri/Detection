@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Клиническая платформа LungDx Pro — диагностика лёгочных заболеваний."""
 import csv
 import io
@@ -378,10 +378,30 @@ def _render_result(result, uploaded_name, quality, study_id,
     decision   = _decision_status(confidence, decision_threshold)
     priority   = _priority_from_filename(uploaded_name, default_priority)
 
-    # Порог "уверенного" диагноза — 60%
-    CERTAIN_THRESHOLD = 0.60
+    # Порог "уверенного" диагноза
+    CERTAIN_THRESHOLD = 0.40
 
-    if confidence >= CERTAIN_THRESHOLD:
+    # Детектируем дифференциальную диагностику Cancer ↔ Pneumonia
+    probs = result.get("probabilities", {})
+    cancer_prob    = float(probs.get("Cancer", 0))
+    pneumonia_prob = float(probs.get("Pneumonia", 0))
+    diff_diag = (
+        cancer_prob > 0.20 and pneumonia_prob > 0.20
+        and abs(cancer_prob - pneumonia_prob) < 0.20
+    )
+
+    if diff_diag:
+        st.markdown(
+            f'<div class="warn-box">'
+            f'<h3>⚕️ Дифференциальная диагностика</h3>'
+            f'<p>Рентгенологическая картина неоднозначна между '
+            f'<b>Раком лёгкого</b> ({cancer_prob*100:.1f}%) '
+            f'и <b>Пневмонией</b> ({pneumonia_prob*100:.1f}%).<br>'
+            f'Эти патологии имеют схожие проявления на рентгене. '
+            f'Необходима КТ или бронхоскопия для верификации.</p></div>',
+            unsafe_allow_html=True,
+        )
+    elif confidence >= CERTAIN_THRESHOLD:
         st.markdown(
             f'<div class="result-box"><h3>Диагноз: {label_ru}</h3>'
             f'<p>Уверенность модели: <b>{confidence*100:.1f}%</b></p></div>',
@@ -396,18 +416,27 @@ def _render_result(result, uploaded_name, quality, study_id,
             unsafe_allow_html=True,
         )
 
+    verdict_text = "Авто ✓" if confidence >= decision_threshold else "На проверку"
+    if diff_diag:
+        verdict_text = "Диф. диагноз"
     m1, m2, m3 = st.columns(3)
     m1.metric("Риск",        risk)
-    m2.metric("Вердикт",     "Авто ✓" if confidence >= decision_threshold else "На проверку")
+    m2.metric("Вердикт",     verdict_text)
     m3.metric("Достоверность", _confidence_band(confidence))
 
-    # Топ-1 прогресс-бар
+    # Топ-2 прогресс-бара всегда видимы
+    sorted_probs = sorted(probs.items(), key=lambda x: -x[1])
     st.progress(confidence, text=f"**{label_ru}**: {confidence*100:.1f}%")
+    if len(sorted_probs) > 1:
+        second_cls, second_prob = sorted_probs[1]
+        second_lbl = CLASS_NAMES_RU_DEFAULT.get(second_cls, second_cls)
+        st.progress(float(second_prob), text=f"{second_lbl}: {second_prob*100:.1f}%")
 
     # Остальные классы — в свёрнутом блоке
-    other_probs = {c: p for c, p in result["probabilities"].items() if c != result["class"]}
+    other_probs = {c: p for c, p in probs.items()
+                   if c != result["class"] and c != (sorted_probs[1][0] if len(sorted_probs) > 1 else "")}
     if other_probs:
-        with st.expander("Распределение по всем классам"):
+        with st.expander("Полное распределение вероятностей"):
             for cls, prob in sorted(other_probs.items(), key=lambda x: -x[1]):
                 lbl = CLASS_NAMES_RU_DEFAULT.get(cls, cls)
                 st.progress(float(prob), text=f"{lbl}: {prob*100:.1f}%")
@@ -461,7 +490,7 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("Параметры сессии")
     user_role          = st.sidebar.selectbox("Роль", ["Врач-рентгенолог", "Лаборант", "Администратор"])
-    decision_threshold = st.sidebar.slider("Порог авто-решения", 0.50, 0.99, 0.85, 0.01)
+    decision_threshold = st.sidebar.slider("Порог авто-решения", 0.40, 0.99, 0.70, 0.01)
     quality_gate       = st.sidebar.checkbox("Quality Gate (блок при плохом снимке)", value=False)
     default_priority   = st.sidebar.selectbox("Приоритет по умолчанию", ["Планово", "Срочно", "STAT (критический)"])
     show_tech          = st.sidebar.checkbox("Model Card (для разработчиков)", value=False)

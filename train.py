@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import Adam
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -143,8 +143,14 @@ def main():
     model = build_model(num_classes=num_classes, pretrained=True, freeze_backbone=False)
     model = model.to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = Adam(model.parameters(), lr=args.lr)
-    scheduler = StepLR(optimizer, step_size=4, gamma=0.5)
+    # Backbone получает меньший LR — тонкая настройка без разрушения предобученных весов
+    backbone_params = [p for n, p in model.named_parameters() if "fc" not in n]
+    head_params     = [p for n, p in model.named_parameters() if "fc" in n]
+    optimizer = Adam([
+        {"params": backbone_params, "lr": args.lr * 0.1},
+        {"params": head_params,     "lr": args.lr},
+    ])
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = Path(args.output)
