@@ -165,6 +165,10 @@ def main():
     meta_path = output_path.parent / "class_names.json"
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(class_names, f, ensure_ascii=False)
+    history_path = output_path.parent / "training_history.json"
+    history["best_acc"] = best_acc
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
     print(f"Model saved to {output_path}")
     print(f"Classes: {class_names}")
 
