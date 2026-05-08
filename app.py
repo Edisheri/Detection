@@ -546,15 +546,22 @@ def main():
 
             if not result.get("is_xray", True):
                 xray_score = result.get("xray_score", 0)
+                details = result.get("xray_details", {})
+                sat = details.get("mean_saturation", "—")
+                dark = details.get("dark_fraction", "—")
                 st.markdown(
-                    f'<div class="reject-box"><b>Изображение отклонено.</b><br>'
-                    f'Эвристика не распознала рентгеновский снимок грудной клетки '
-                    f'(оценка соответствия: {xray_score*100:.0f}%). '
-                    f'Диагноз не выставляется.</div>',
+                    f'<div class="reject-box">'
+                    f'<b>⛔ Изображение не является рентгеновским снимком</b><br>'
+                    f'Система отклонила файл: обнаружены признаки цветного или нерелевантного изображения.<br>'
+                    f'Оценка соответствия: <b>{xray_score*100:.0f}%</b> '
+                    f'(насыщенность цвета: {sat if isinstance(sat, str) else f"{sat:.3f}"}, '
+                    f'доля тёмного фона: {dark if isinstance(dark, str) else f"{dark:.2%}"}).<br>'
+                    f'<i>Пожалуйста, загрузите рентгенограмму грудной клетки (DICOM / JPEG / PNG).</i>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
-                if quality_gate:
-                    st.stop()
+                # Диагноз не показывается НИКОГДА для нерентгеновских изображений
+                st.stop()
             else:
                 if result.get("xray_score", 1.0) < 0.9:
                     st.markdown(

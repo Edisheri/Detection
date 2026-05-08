@@ -31,9 +31,14 @@ def load_model(weights_path: str, device=None):
 
 def is_likely_chest_xray(image_or_path) -> dict:
     """
-    Эвристика для отсеивания "не-рентген" изображений (фото кота, пейзаж и т.п.).
-    Возвращает dict со score и булевым решением, чтобы UI мог показывать
-    степень доверия проверке, а не только бинарный флаг.
+    Эвристика для отсеивания "не-рентген" изображений.
+
+    Надёжные признаки рентгена грудной клетки:
+      1. Низкая насыщенность цвета (рентген — чёрно-белый по природе)
+      2. Большая доля тёмных пикселей (чёрный фон)
+      3. Умеренный контраст (не плоский, не слишком резкий)
+      4. Допустимое соотношение сторон (рентген ≈ квадратный)
+      5. Характерный диапазон яркости (тёмный, но с яркими областями)
     """
     if isinstance(image_or_path, (str, Path)):
         img = Image.open(image_or_path).convert("RGB")
@@ -41,44 +46,57 @@ def is_likely_chest_xray(image_or_path) -> dict:
         img = image_or_path.convert("RGB")
 
     arr = np.array(img.resize((256, 256))).astype("float32")
-
-    flat = arr.reshape(-1, 3)
-    ch_means = flat.mean(axis=0)
-    color_spread = abs(ch_means[0] - ch_means[1]) + abs(ch_means[1] - ch_means[2])
-    grayscale_like = color_spread < 18.0
-
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     gray = arr.mean(axis=2)
-    h, w = gray.shape
-    center = gray[h // 4: 3 * h // 4, w // 4: 3 * w // 4].mean()
-    corners = np.concatenate([
-        gray[: h // 4, : w // 4].ravel(),
-        gray[: h // 4, 3 * w // 4:].ravel(),
-        gray[3 * h // 4:, : w // 4].ravel(),
-        gray[3 * h // 4:, 3 * w // 4:].ravel(),
-    ]).mean()
-    center_brighter = (center - corners) > 3.0
 
+    # 1. Насыщенность цвета (главный критерий)
+    #    Рентген почти чисто серый → насыщенность ≈ 0.
+    #    Фото людей/животных/природы имеют высокую насыщенность.
+    max_ch = np.maximum(np.maximum(r, g), b)
+    min_ch = np.minimum(np.minimum(r, g), b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        saturation = np.where(max_ch > 1e-3, (max_ch - min_ch) / np.where(max_ch > 1e-3, max_ch, 1.0), 0.0)
+    mean_sat = float(saturation.mean())
+    low_saturation = mean_sat < 0.10          # цветные фото обычно > 0.20
+
+    # 2. Доля тёмных пикселей — рентген имеет много чёрного фона
+    dark_fraction = float((gray < 40).mean())
+    has_dark_bg = dark_fraction > 0.10        # > 10% пикселей почти чёрные
+
+    # 3. Контраст — рентген: std серого в диапазоне 30-90
     contrast = float(gray.std())
-    contrast_ok = 25.0 < contrast < 90.0
+    contrast_ok = 28.0 < contrast < 95.0
 
-    edges = np.abs(np.diff(gray, axis=0)).mean() + np.abs(np.diff(gray, axis=1)).mean()
-    edges_ok = 1.5 < edges < 25.0
+    # 4. Соотношение сторон — рентген грудной клетки ~0.7–1.4
+    w_px, h_px = img.size
+    aspect = w_px / max(h_px, 1)
+    aspect_ok = 0.60 < aspect < 1.55
 
-    score_components = [grayscale_like, center_brighter, contrast_ok, edges_ok]
-    score = sum(1.0 for x in score_components if x) / len(score_components)
-    is_xray = score >= 0.75
+    # 5. Средняя яркость — рентген в диапазоне 30-160 (темнее обычного фото)
+    mean_brightness = float(gray.mean())
+    brightness_ok = 20.0 < mean_brightness < 175.0
+
+    checks = [low_saturation, has_dark_bg, contrast_ok, aspect_ok, brightness_ok]
+    score = sum(1.0 for c in checks if c) / len(checks)
+
+    # Обязательное условие: насыщенность ДОЛЖНА быть низкой.
+    # Без него цветные фото могут набрать 4/5 по остальным критериям.
+    is_xray = bool(score >= 0.60 and low_saturation)
 
     return {
-        "is_xray": bool(is_xray),
+        "is_xray": is_xray,
         "score": float(score),
         "details": {
-            "grayscale_like": bool(grayscale_like),
-            "center_brighter": bool(center_brighter),
+            "low_saturation": bool(low_saturation),
+            "has_dark_bg": bool(has_dark_bg),
             "contrast_ok": bool(contrast_ok),
-            "edges_ok": bool(edges_ok),
-            "color_spread": float(color_spread),
-            "contrast": float(contrast),
-            "edges": float(edges),
+            "aspect_ok": bool(aspect_ok),
+            "brightness_ok": bool(brightness_ok),
+            "mean_saturation": round(mean_sat, 3),
+            "dark_fraction": round(dark_fraction, 3),
+            "contrast": round(contrast, 1),
+            "mean_brightness": round(mean_brightness, 1),
+            "aspect": round(aspect, 2),
         },
     }
 
