@@ -49,54 +49,66 @@ def is_likely_chest_xray(image_or_path) -> dict:
     r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     gray = arr.mean(axis=2)
 
-    # 1. Насыщенность цвета (главный критерий)
-    #    Рентген почти чисто серый → насыщенность ≈ 0.
-    #    Фото людей/животных/природы имеют высокую насыщенность.
+    # 1. ПОПИКСЕЛЬНАЯ СЕРОСТЬ — ключевой признак рентгена.
+    #    Рентген сохраняется как grayscale→RGB: каждый пиксель R=G=B.
+    #    Цветные фото (люди, вещи, природа) всегда имеют расхождение каналов
+    #    даже на "серых" участках (кожа, тени, блики).
+    per_pixel_diff = float((np.abs(r - g) + np.abs(g - b) + np.abs(r - b)).mean() / 3.0)
+    truly_grayscale = per_pixel_diff < 6.0   # рентген: 0–3, цветное фото: 8–40+
+
+    # 2. HSV-насыщенность (второй слой защиты)
     max_ch = np.maximum(np.maximum(r, g), b)
     min_ch = np.minimum(np.minimum(r, g), b)
     with np.errstate(divide="ignore", invalid="ignore"):
-        saturation = np.where(max_ch > 1e-3, (max_ch - min_ch) / np.where(max_ch > 1e-3, max_ch, 1.0), 0.0)
-    mean_sat = float(saturation.mean())
-    low_saturation = mean_sat < 0.10          # цветные фото обычно > 0.20
+        sat = np.where(max_ch > 1e-3,
+                       (max_ch - min_ch) / np.where(max_ch > 1e-3, max_ch, 1.0),
+                       0.0)
+    mean_sat = float(sat.mean())
+    low_saturation = mean_sat < 0.12
 
-    # 2. Доля тёмных пикселей — рентген имеет много чёрного фона
-    dark_fraction = float((gray < 40).mean())
-    has_dark_bg = dark_fraction > 0.10        # > 10% пикселей почти чёрные
+    # 3. Доля тёмных пикселей (рентген имеет чёрный фон)
+    dark_fraction = float((gray < 45).mean())
+    has_dark_bg = dark_fraction > 0.08
 
-    # 3. Контраст — рентген: std серого в диапазоне 30-90
+    # 4. Контраст в разумном диапазоне
     contrast = float(gray.std())
-    contrast_ok = 28.0 < contrast < 95.0
+    contrast_ok = 20.0 < contrast < 100.0
 
-    # 4. Соотношение сторон — рентген грудной клетки ~0.7–1.4
+    # 5. Соотношение сторон (рентген ~квадратный)
     w_px, h_px = img.size
     aspect = w_px / max(h_px, 1)
-    aspect_ok = 0.60 < aspect < 1.55
+    aspect_ok = 0.55 < aspect < 1.60
 
-    # 5. Средняя яркость — рентген в диапазоне 30-160 (темнее обычного фото)
-    mean_brightness = float(gray.mean())
-    brightness_ok = 20.0 < mean_brightness < 175.0
+    # 6. Процент почти-одинаковых каналов попиксельно (строгее критерия 1)
+    #    Для рентгена: > 85% пикселей имеют |R-G| < 10 AND |G-B| < 10
+    close_px = float(((np.abs(r - g) < 10) & (np.abs(g - b) < 10)).mean())
+    mostly_gray_pixels = close_px > 0.85
 
-    checks = [low_saturation, has_dark_bg, contrast_ok, aspect_ok, brightness_ok]
-    score = sum(1.0 for c in checks if c) / len(checks)
+    secondary_checks = [has_dark_bg, contrast_ok, aspect_ok]
+    secondary_score = sum(1.0 for c in secondary_checks if c) / len(secondary_checks)
 
-    # Обязательное условие: насыщенность ДОЛЖНА быть низкой.
-    # Без него цветные фото могут набрать 4/5 по остальным критериям.
-    is_xray = bool(score >= 0.60 and low_saturation)
+    # Обязательно: попиксельная серость И низкая насыщенность.
+    # Без этих двух условий диагноз не выставляется независимо от остального.
+    mandatory = truly_grayscale and low_saturation and mostly_gray_pixels
+    score = round((0.5 * float(mandatory) + 0.3 * secondary_score +
+                   0.2 * float(has_dark_bg)), 2)
+    is_xray = bool(mandatory and secondary_score >= 0.33)
 
     return {
         "is_xray": is_xray,
-        "score": float(score),
+        "score": score,
         "details": {
+            "truly_grayscale": bool(truly_grayscale),
             "low_saturation": bool(low_saturation),
+            "mostly_gray_pixels": bool(mostly_gray_pixels),
             "has_dark_bg": bool(has_dark_bg),
             "contrast_ok": bool(contrast_ok),
             "aspect_ok": bool(aspect_ok),
-            "brightness_ok": bool(brightness_ok),
+            "per_pixel_diff": round(per_pixel_diff, 2),
             "mean_saturation": round(mean_sat, 3),
+            "close_px_fraction": round(close_px, 3),
             "dark_fraction": round(dark_fraction, 3),
             "contrast": round(contrast, 1),
-            "mean_brightness": round(mean_brightness, 1),
-            "aspect": round(aspect, 2),
         },
     }
 
