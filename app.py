@@ -545,22 +545,30 @@ def main():
             xray_check = is_likely_chest_xray(image)
             if not xray_check["is_xray"]:
                 d = xray_check["details"]
-                ppd  = d.get("per_pixel_diff", "—")
-                sat  = d.get("mean_saturation", "—")
-                gray = d.get("close_px_fraction", "—")
+                ppd  = d.get("per_pixel_diff", 0)
+                sat  = d.get("mean_saturation", 0)
+                sym  = d.get("symmetry_diff", 0)
+
+                if not d.get("truly_grayscale", True) or not d.get("low_saturation", True):
+                    reason = "изображение содержит цветовые компоненты (рентген — grayscale)"
+                elif not d.get("symmetric", True):
+                    reason = "изображение не симметрично по вертикальной оси (рентген грудной клетки симметричен)"
+                else:
+                    reason = "не выполнены условия принятия рентгенограммы"
+
                 st.markdown(
                     f'<div class="reject-box">'
                     f'<b>⛔ Изображение не является рентгеновским снимком</b><br>'
-                    f'Обнаружены признаки цветного или нерелевантного изображения. '
+                    f'Причина: <b>{reason}</b>.<br>'
                     f'Нейросетевой анализ не выполняется.<br><br>'
                     f'<b>Диагностические показатели:</b><br>'
-                    f'• Межканальная разница (ppd): <b>{ppd if isinstance(ppd,str) else f"{ppd:.1f}"}</b> '
-                    f'(норма для рентгена: &lt; 6)<br>'
-                    f'• Цветовая насыщенность: <b>{sat if isinstance(sat,str) else f"{sat:.3f}"}</b> '
-                    f'(норма для рентгена: &lt; 0.12)<br>'
-                    f'• Доля серых пикселей: <b>{gray if isinstance(gray,str) else f"{gray:.1%}"}</b> '
-                    f'(норма для рентгена: &gt; 85%)<br><br>'
-                    f'<i>Пожалуйста, загрузите рентгенограмму грудной клетки (JPG / PNG).</i>'
+                    f'• Цветность (ppd): <b>{ppd:.1f}</b> '
+                    f'<span style="color:#888">(рентген: &lt; 6)</span><br>'
+                    f'• Насыщенность: <b>{sat:.3f}</b> '
+                    f'<span style="color:#888">(рентген: &lt; 0.12)</span><br>'
+                    f'• Симметрия: <b>{sym:.1f}</b> '
+                    f'<span style="color:#888">(рентген: &lt; 35)</span><br><br>'
+                    f'<i>Пожалуйста, загрузите рентгенограмму грудной клетки.</i>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )

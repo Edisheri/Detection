@@ -50,13 +50,12 @@ def is_likely_chest_xray(image_or_path) -> dict:
     gray = arr.mean(axis=2)
 
     # 1. ПОПИКСЕЛЬНАЯ СЕРОСТЬ — ключевой признак рентгена.
-    #    Рентген сохраняется как grayscale→RGB: каждый пиксель R=G=B.
-    #    Цветные фото (люди, вещи, природа) всегда имеют расхождение каналов
-    #    даже на "серых" участках (кожа, тени, блики).
+    #    Рентген сохраняется как grayscale→RGB: каждый пиксель R=G=B (ppd=0).
+    #    Серый костюм/асфальт/чёрно-белое фото имеют ppd ≥ 4 из-за тонирования.
     per_pixel_diff = float((np.abs(r - g) + np.abs(g - b) + np.abs(r - b)).mean() / 3.0)
-    truly_grayscale = per_pixel_diff < 6.0   # рентген: 0–3, цветное фото: 8–40+
+    truly_grayscale = per_pixel_diff < 2.5   # рентген: 0-1, костюм: 4.9, фото: 7+
 
-    # 2. HSV-насыщенность (второй слой защиты)
+    # 2. HSV-насыщенность (вторая независимая проверка)
     max_ch = np.maximum(np.maximum(r, g), b)
     min_ch = np.minimum(np.minimum(r, g), b)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -64,7 +63,7 @@ def is_likely_chest_xray(image_or_path) -> dict:
                        (max_ch - min_ch) / np.where(max_ch > 1e-3, max_ch, 1.0),
                        0.0)
     mean_sat = float(sat.mean())
-    low_saturation = mean_sat < 0.12
+    low_saturation = mean_sat < 0.05         # рентген: 0.000, костюм: 0.074
 
     # 3. Доля тёмных пикселей (рентген имеет чёрный фон)
     dark_fraction = float((gray < 45).mean())
@@ -84,15 +83,29 @@ def is_likely_chest_xray(image_or_path) -> dict:
     close_px = float(((np.abs(r - g) < 10) & (np.abs(g - b) < 10)).mean())
     mostly_gray_pixels = close_px > 0.85
 
-    secondary_checks = [has_dark_bg, contrast_ok, aspect_ok]
-    secondary_score = sum(1.0 for c in secondary_checks if c) / len(secondary_checks)
+    # 7. Симметрия по вертикальной оси (мягкая проверка, без неё многие
+    #    реальные асимметричные снимки (односторонний рак) отклонялись бы).
+    h_g, w_g = gray.shape
+    left_half  = gray[:, :w_g // 2]
+    right_half = np.fliplr(gray[:, w_g - w_g // 2:])
+    min_w = min(left_half.shape[1], right_half.shape[1])
+    diff_sym = float(np.abs(left_half[:, :min_w] - right_half[:, :min_w]).mean())
+    symmetric = diff_sym < 50.0
 
-    # Обязательно: попиксельная серость И низкая насыщенность.
-    # Без этих двух условий диагноз не выставляется независимо от остального.
-    mandatory = truly_grayscale and low_saturation and mostly_gray_pixels
-    score = round((0.5 * float(mandatory) + 0.3 * secondary_score +
-                   0.2 * float(has_dark_bg)), 2)
-    is_xray = bool(mandatory and secondary_score >= 0.33)
+    # ── Финальное решение ────────────────────────────────────────────────────
+    # Главные обязательные условия:
+    #   1. ppd < 2.5  (изображение действительно grayscale, не тонированное)
+    #   2. sat < 0.05 (нулевая цветовая насыщенность)
+    # Они отсекают:
+    #   - все цветные фото (ppd > 6)
+    #   - все ч/б фото с тонингом (костюм sat=0.074, ч/б фото sat=0.32)
+    color_ok        = truly_grayscale and low_saturation
+    secondary_score = sum(1.0 for c in [contrast_ok, aspect_ok, has_dark_bg] if c) / 3.0
+
+    is_xray = bool(color_ok and symmetric and secondary_score >= 0.50)
+
+    score = round(0.5 * float(color_ok) + 0.3 * float(symmetric) +
+                  0.2 * secondary_score, 2)
 
     return {
         "is_xray": is_xray,
@@ -101,6 +114,7 @@ def is_likely_chest_xray(image_or_path) -> dict:
             "truly_grayscale": bool(truly_grayscale),
             "low_saturation": bool(low_saturation),
             "mostly_gray_pixels": bool(mostly_gray_pixels),
+            "symmetric": bool(symmetric),
             "has_dark_bg": bool(has_dark_bg),
             "contrast_ok": bool(contrast_ok),
             "aspect_ok": bool(aspect_ok),
@@ -108,6 +122,7 @@ def is_likely_chest_xray(image_or_path) -> dict:
             "mean_saturation": round(mean_sat, 3),
             "close_px_fraction": round(close_px, 3),
             "dark_fraction": round(dark_fraction, 3),
+            "symmetry_diff": round(diff_sym, 1),
             "contrast": round(contrast, 1),
         },
     }
