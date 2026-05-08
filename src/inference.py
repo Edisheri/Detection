@@ -1,7 +1,6 @@
 """Inference for lung disease classification."""
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -13,7 +12,9 @@ from src.model import build_model
 def load_model(weights_path: str, device=None):
     """Load trained model from checkpoint."""
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # В Streamlit-процессе принудительно используем CPU чтобы
+        # избежать конфликтов CUDA DLL в дочернем веб-процессе Windows.
+        device = torch.device("cpu")
     try:
         ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     except TypeError:
@@ -28,72 +29,85 @@ def load_model(weights_path: str, device=None):
     return model, class_names, image_size, device
 
 
-def is_likely_chest_xray(image_or_path):
+def is_likely_chest_xray(image_or_path) -> dict:
     """
-    Простейшая эвристика, чтобы отличать рентген грудной клетки от произвольных фото.
-    Используется только для того, чтобы не ставить диагноз на «левых» картинках.
+    Эвристика для отсеивания "не-рентген" изображений (фото кота, пейзаж и т.п.).
+    Возвращает dict со score и булевым решением, чтобы UI мог показывать
+    степень доверия проверке, а не только бинарный флаг.
     """
     if isinstance(image_or_path, (str, Path)):
         img = Image.open(image_or_path).convert("RGB")
     else:
         img = image_or_path.convert("RGB")
 
-    arr = np.array(img.resize((256, 256)))
+    arr = np.array(img.resize((256, 256))).astype("float32")
 
-    # 1) Картина должна быть практически чёрно‑белой (X‑ray обычно серый)
-    flat = arr.reshape(-1, 3).astype("float32")
+    flat = arr.reshape(-1, 3)
     ch_means = flat.mean(axis=0)
     color_spread = abs(ch_means[0] - ch_means[1]) + abs(ch_means[1] - ch_means[2])
-    grayscale_like = color_spread < 15.0
+    grayscale_like = color_spread < 18.0
 
-    # 2) Центр должен быть светлее углов (лёгкие в середине, края темнее)
-    g = arr.mean(axis=2)
-    h, w = g.shape
-    center = g[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4].mean()
-    corners = np.concatenate(
-        [
-            g[: h // 4, : w // 4].ravel(),
-            g[: h // 4, 3 * w // 4 :].ravel(),
-            g[3 * h // 4 :, : w // 4].ravel(),
-            g[3 * h // 4 :, 3 * w // 4 :].ravel(),
-        ]
-    ).mean()
+    gray = arr.mean(axis=2)
+    h, w = gray.shape
+    center = gray[h // 4: 3 * h // 4, w // 4: 3 * w // 4].mean()
+    corners = np.concatenate([
+        gray[: h // 4, : w // 4].ravel(),
+        gray[: h // 4, 3 * w // 4:].ravel(),
+        gray[3 * h // 4:, : w // 4].ravel(),
+        gray[3 * h // 4:, 3 * w // 4:].ravel(),
+    ]).mean()
     center_brighter = (center - corners) > 3.0
 
-    return bool(grayscale_like and center_brighter)
+    contrast = float(gray.std())
+    contrast_ok = 25.0 < contrast < 90.0
+
+    edges = np.abs(np.diff(gray, axis=0)).mean() + np.abs(np.diff(gray, axis=1)).mean()
+    edges_ok = 1.5 < edges < 25.0
+
+    score_components = [grayscale_like, center_brighter, contrast_ok, edges_ok]
+    score = sum(1.0 for x in score_components if x) / len(score_components)
+    is_xray = score >= 0.75
+
+    return {
+        "is_xray": bool(is_xray),
+        "score": float(score),
+        "details": {
+            "grayscale_like": bool(grayscale_like),
+            "center_brighter": bool(center_brighter),
+            "contrast_ok": bool(contrast_ok),
+            "edges_ok": bool(edges_ok),
+            "color_spread": float(color_spread),
+            "contrast": float(contrast),
+            "edges": float(edges),
+        },
+    }
 
 
-def predict_image(model, image_path_or_pil, class_names, image_size, device):
-    """
-    Run prediction on a single image.
-    image_path_or_pil: path (str/Path) or PIL.Image
-    Returns: dict with class name, index, probabilities and flags.
-    """
+def predict_image(model, image_path_or_pil, class_names, image_size, device) -> dict:
+    """Один реальный прогон модели по изображению (без demo-логики)."""
     transform = get_transforms(image_size, train=False)
     if isinstance(image_path_or_pil, (str, Path)):
         image = Image.open(image_path_or_pil).convert("RGB")
     else:
         image = image_path_or_pil.convert("RGB")
 
-    looks_like_xray = is_likely_chest_xray(image)
+    xray_check = is_likely_chest_xray(image)
 
     x = transform(image).unsqueeze(0).to(device)
     with torch.no_grad():
         logits = model(x)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
         pred_idx = int(logits.argmax(dim=1).item())
-        raw_confidence = float(probs[pred_idx])
+        confidence = float(probs[pred_idx])
 
-    # Demo режим:
-    # - показываем только один выбранный диагноз (top-1)
-    # - поднимаем уверенность в диапазон 80-99% для презентации прототипа
-    demo_confidence = min(0.99, 0.80 + raw_confidence * 0.19)
     return {
         "class": class_names[pred_idx],
         "class_index": pred_idx,
-        "probabilities": {class_names[pred_idx]: demo_confidence},
-        "confidence": demo_confidence,
-        "is_xray": looks_like_xray,
+        "probabilities": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
+        "confidence": confidence,
+        "is_xray": xray_check["is_xray"],
+        "xray_score": xray_check["score"],
+        "xray_details": xray_check["details"],
     }
 
 
@@ -150,9 +164,16 @@ def generate_gradcam(model, image_path_or_pil, class_names, image_size, device, 
 
         orig = np.array(image)
         h, w = orig.shape[:2]
-        cam_resized = cv2.resize(cam, (w, h))
-        heatmap = cv2.applyColorMap(np.uint8(cam_resized * 255), cv2.COLORMAP_JET)
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        # Resize cam with PIL (no cv2 dependency)
+        cam_pil = Image.fromarray(np.uint8(cam * 255)).resize((w, h), Image.BILINEAR)
+        cam_resized = np.array(cam_pil).astype(np.float32) / 255.0
+        # Jet colormap via numpy
+        t = cam_resized
+        r = np.clip(1.5 - np.abs(4 * t - 3), 0, 1)
+        g = np.clip(1.5 - np.abs(4 * t - 2), 0, 1)
+        b = np.clip(1.5 - np.abs(4 * t - 1), 0, 1)
+        heatmap = np.stack([r, g, b], axis=-1)
+        heatmap = np.uint8(heatmap * 255)
         overlay = np.clip(0.55 * orig + 0.45 * heatmap, 0, 255).astype(np.uint8)
 
         return {

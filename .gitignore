@@ -1,11 +1,24 @@
+# Виртуальное окружение
+.venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Датасеты — не пушим в репо
+data/
+
+# Веса модели (бинарные, большие файлы)
 *.pt
-data/chest_xray/train/
-data/chest_xray/val/
-data/chest_xray/*.zip
 weights/*.pt
 !weights/.gitkeep
+
+# Отчёты и метрики (генерируются при обучении)
+reports/
+
+# Служебные
 .DS_Store
 *.log
+.idea/
+*.docx
+fix_encoding.py
