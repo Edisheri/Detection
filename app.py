@@ -16,7 +16,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import WEIGHTS_PATH, CLASS_NAMES_RU, METRICS_DIR
-from src.inference import load_model, predict_image, generate_gradcam
+from src.inference import load_model, predict_image, generate_gradcam, is_likely_chest_xray
 
 st.set_page_config(
     page_title="LungDx Pro — Диагностика лёгочных заболеваний",
@@ -541,71 +541,77 @@ def main():
             st.caption(f"Study ID: {study_id} | Файл: {uploaded.name}")
 
         with col_result:
-            with st.spinner("Анализ изображения..."):
-                result = predict_image(model, image, class_names, image_size, device)
-
-            if not result.get("is_xray", True):
-                xray_score = result.get("xray_score", 0)
-                details = result.get("xray_details", {})
-                sat = details.get("mean_saturation", "—")
-                dark = details.get("dark_fraction", "—")
+            # ── Проверка X-ray ДО запуска модели ─────────────────────────────
+            xray_check = is_likely_chest_xray(image)
+            if not xray_check["is_xray"]:
+                d = xray_check["details"]
+                ppd  = d.get("per_pixel_diff", "—")
+                sat  = d.get("mean_saturation", "—")
+                gray = d.get("close_px_fraction", "—")
                 st.markdown(
                     f'<div class="reject-box">'
                     f'<b>⛔ Изображение не является рентгеновским снимком</b><br>'
-                    f'Система отклонила файл: обнаружены признаки цветного или нерелевантного изображения.<br>'
-                    f'Оценка соответствия: <b>{xray_score*100:.0f}%</b> '
-                    f'(насыщенность цвета: {sat if isinstance(sat, str) else f"{sat:.3f}"}, '
-                    f'доля тёмного фона: {dark if isinstance(dark, str) else f"{dark:.2%}"}).<br>'
-                    f'<i>Пожалуйста, загрузите рентгенограмму грудной клетки (DICOM / JPEG / PNG).</i>'
+                    f'Обнаружены признаки цветного или нерелевантного изображения. '
+                    f'Нейросетевой анализ не выполняется.<br><br>'
+                    f'<b>Диагностические показатели:</b><br>'
+                    f'• Межканальная разница (ppd): <b>{ppd if isinstance(ppd,str) else f"{ppd:.1f}"}</b> '
+                    f'(норма для рентгена: &lt; 6)<br>'
+                    f'• Цветовая насыщенность: <b>{sat if isinstance(sat,str) else f"{sat:.3f}"}</b> '
+                    f'(норма для рентгена: &lt; 0.12)<br>'
+                    f'• Доля серых пикселей: <b>{gray if isinstance(gray,str) else f"{gray:.1%}"}</b> '
+                    f'(норма для рентгена: &gt; 85%)<br><br>'
+                    f'<i>Пожалуйста, загрузите рентгенограмму грудной клетки (JPG / PNG).</i>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
-                # Диагноз не показывается НИКОГДА для нерентгеновских изображений
                 st.stop()
-            else:
-                if result.get("xray_score", 1.0) < 0.9:
-                    st.markdown(
-                        f'<div class="warn-box">⚠️ Оценка качества снимка: '
-                        f'{result.get("xray_score", 0)*100:.0f}%. '
-                        f'Рекомендуется повторная съёмка.</div>',
-                        unsafe_allow_html=True,
-                    )
 
-                if result["confidence"] < decision_threshold:
-                    st.warning(
-                        f"Уверенность модели ({result['confidence']*100:.1f}%) ниже порога "
-                        f"({decision_threshold*100:.0f}%). Рекомендуется ручная верификация."
-                    )
+            with st.spinner("Анализ изображения..."):
+                result = predict_image(model, image, class_names, image_size, device)
 
-                payload, risk, decision, priority = _render_result(
-                    result, uploaded.name, quality, study_id,
-                    decision_threshold, default_priority, image,
+            if result.get("xray_score", 1.0) < 0.9:
+                st.markdown(
+                    f'<div class="warn-box">⚠️ Оценка качества снимка: '
+                    f'{result.get("xray_score", 0)*100:.0f}%. '
+                    f'Рекомендуется повторная съёмка.</div>',
+                    unsafe_allow_html=True,
                 )
 
-                event_key = f"{study_id}:{result['class']}:{result['confidence']:.4f}"
-                if event_key != st.session_state["last_event_hash"]:
-                    st.session_state["last_event_hash"] = event_key
-                    st.session_state["analysis_history"].append({
-                        "Время": datetime.now().strftime("%H:%M:%S"),
-                        "StudyID": study_id,
-                        "Файл": uploaded.name,
-                        "Диагноз": CLASS_NAMES_RU_DEFAULT.get(result["class"], result["class"]),
-                        "Уверенность, %": round(result["confidence"] * 100, 1),
-                        "Риск": risk,
-                        "Решение": decision,
-                    })
-                    st.session_state["audit_log"].append({
-                        "timestamp": datetime.now().isoformat(timespec="seconds"),
-                        "study_id": study_id,
-                        "file_name": uploaded.name,
-                        "predicted_class": result["class"],
-                        "confidence": round(result["confidence"], 4),
-                        "threshold": decision_threshold,
-                        "decision": decision,
-                        "band": _confidence_band(result["confidence"]),
-                        "priority": priority,
-                        "sla_target": _sla_by_priority(priority),
-                    })
+            if result["confidence"] < decision_threshold:
+                st.warning(
+                    f"Уверенность модели ({result['confidence']*100:.1f}%) ниже порога "
+                    f"({decision_threshold*100:.0f}%). Рекомендуется ручная верификация."
+                )
+
+            payload, risk, decision, priority = _render_result(
+                result, uploaded.name, quality, study_id,
+                decision_threshold, default_priority, image,
+            )
+
+            event_key = f"{study_id}:{result['class']}:{result['confidence']:.4f}"
+            if event_key != st.session_state["last_event_hash"]:
+                st.session_state["last_event_hash"] = event_key
+                st.session_state["analysis_history"].append({
+                    "Время": datetime.now().strftime("%H:%M:%S"),
+                    "StudyID": study_id,
+                    "Файл": uploaded.name,
+                    "Диагноз": CLASS_NAMES_RU_DEFAULT.get(result["class"], result["class"]),
+                    "Уверенность, %": round(result["confidence"] * 100, 1),
+                    "Риск": risk,
+                    "Решение": decision,
+                })
+            st.session_state["audit_log"].append({
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "study_id": study_id,
+                "file_name": uploaded.name,
+                "predicted_class": result["class"],
+                "confidence": round(result["confidence"], 4),
+                "threshold": decision_threshold,
+                "decision": decision,
+                "band": _confidence_band(result["confidence"]),
+                "priority": priority,
+                "sla_target": _sla_by_priority(priority),
+            })
 
         st.markdown("---")
         st.subheader("Контроль качества снимка")
