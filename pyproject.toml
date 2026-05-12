@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "lungdx-pro"
+version = "1.0.0"
+description = "Clinical lung X-ray classification platform (ResNet18 + Streamlit)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["deep-learning", "radiology", "chest-xray", "streamlit", "resnet18"]
+authors = [{ name = "umys1" }]
+
+[project.scripts]
+lungdx-app = "run_app:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths  = ["tests"]
+addopts    = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore  = ["E501", "N803", "N806"]
